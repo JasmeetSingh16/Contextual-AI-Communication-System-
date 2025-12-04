@@ -1,0 +1,543 @@
+{
+  "name": "AI Contextual Communication Assistant copy 2 copy copy",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -112,
+        256
+      ],
+      "id": "3b8a2cff-51d0-43a7-83ad-cf76bd0725fb",
+      "name": "Telegram Trigger",
+      "webhookId": "9ea063a1-63ac-47e9-9f77-ecf7acbcc8cc",
+      "credentials": {
+        "telegramApi": {
+          "id": "5EkWZ1dI9Jk9giXW",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "2f694e0b-87a9-4f6f-bf22-60368bbd6342",
+              "leftValue": "={{$json[\"message\"][\"text\"]}}\n\n",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        784,
+        160
+      ],
+      "id": "58ba3977-b219-403b-afcf-9425b1183889",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0ba280cd-f2b4-468c-93af-25c5401d7310",
+              "name": "text",
+              "value": "={{ $json.text || $json.message?.text }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1008,
+        256
+      ],
+      "id": "b8b9df23-3bfc-4884-ae9c-566aacf4f65e",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer <api_key>"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"llama-3.3-70b-versatile\",\n  messages: [\n    {\n      role: \"system\",\n      content:\n        \"You help professionals reply to messages (WhatsApp, email, chat, etc.). You will receive either: (1) a single message, (2) a full conversation with labels like 'ME:' and 'CLIENT:', or (3) a raw copy-paste of a chat without labels. Always read the entire text and then write replies based on the overall context and the latest message from the other person.\"\n    },\n    {\n      role: \"user\",\n      content:\n        \"Here is the full text or chat (may include both sides, may or may not use labels like ME: / CLIENT:):\\n\\n\"\n        + $node[\"Edit Fields\"].json[\"text\"]      // 🔴 changed from $json.text\n        + \"\\n\\nYour tasks:\\n1. Read the full message or full chat.\\n2. Figure out what the other person wants, feels, or is asking in the most recent message.\\n3. Generate replies that I (the user) can send next.\\n\\nIf the roles are NOT clearly marked with ME: / CLIENT:, assume the last line in the text is the other person's latest message and respond to that.\\n\\nRespond in EXACTLY this plain TEXT format (no bullets, no extra commentary, no JSON, no code fences):\\nSummary: one sentence summary of the situation\\nProfessional: professional reply I can send\\nFriendly: friendly, warm reply I can send\\nFirm: firm but polite reply I can send\"\n    }\n  ],\n  temperature: 0.4\n}) }}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1424,
+        256
+      ],
+      "id": "ead63fe9-4a28-4637-925d-992a70e2f7f1",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1) Get raw LLM text from the main Groq call\nlet raw = $json?.choices?.[0]?.message?.content ?? \"\";\nraw = String(raw).trim();\n\n// 2) Safely read intent & tone from the intent parser node (Code in JavaScript1)\nlet intent = \"unknown\";\nlet tone = \"neutral\";\n\ntry {\n  const ctx = $node[\"Code in JavaScript1\"];   // <-- this is your parser node name\n  if (ctx && ctx.json) {\n    intent = ctx.json.intent || \"unknown\";\n    tone   = ctx.json.tone   || \"neutral\";\n  }\n} catch (e) {\n  intent = \"unknown\";\n  tone   = \"neutral\";\n}\n\n// 3) Split into lines and parse summary / professional / friendly / firm\nconst lines = raw.split(\"\\n\").map(l => l.trim()).filter(Boolean);\n\nlet summary = \"\";\nlet professional = \"\";\nlet friendly = \"\";\nlet firm = \"\";\n\nfor (const line of lines) {\n  const lower = line.toLowerCase();\n\n  if (lower.startsWith(\"summary:\")) {\n    summary = line.slice(\"summary:\".length).trim();\n  } else if (lower.startsWith(\"professional:\")) {\n    professional = line.slice(\"professional:\".length).trim();\n  } else if (lower.startsWith(\"friendly:\")) {\n    friendly = line.slice(\"friendly:\".length).trim();\n  } else if (lower.startsWith(\"firm:\")) {\n    firm = line.slice(\"firm:\".length).trim();\n  }\n}\n\n// 4) FALLBACK: if model didn't follow the format,\n//    treat the whole raw text as the \"professional\" reply.\nif (!summary && !professional && !friendly && !firm) {\n  professional = raw;\n}\n\n// 5) Decide finalReply based on intent & tone\nlet finalReply = professional || friendly || firm || summary || raw;\n\n// Emotional / frustrated / excited → be friendly\nif (\n  intent === \"emotional_support\" ||\n  tone === \"frustrated\" ||\n  tone === \"excited\"\n) {\n  finalReply = friendly || professional || finalReply;\n\n// Status update or formal tone → be professional\n} else if (intent === \"status_update\" || tone === \"formal\") {\n  finalReply = professional || finalReply;\n\n// Questions / chit-chat → friendly\n} else if (intent === \"question\" || intent === \"chit_chat\") {\n  finalReply = friendly || professional || finalReply;\n}\n\n// Final ultimate fallback\nif (!finalReply) {\n  finalReply = raw;\n}\n\n// 6) Return everything\nreturn [{\n  json: {\n    summary,\n    professional,\n    friendly,\n    firm,\n    finalReply,\n    intent,\n    tone,\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        256
+      ],
+      "id": "70403bcf-b6e3-41a9-b74e-c7bfb7371e65",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "chatId": "={{$node[\"Telegram Trigger\"].json[\"message\"][\"chat\"][\"id\"]}}\n",
+        "text": "={{$node[\"Code in JavaScript\"].json[\"finalReply\"]}}\n\n",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1904,
+        256
+      ],
+      "id": "47718fe6-4463-40b8-b7da-13634eb89a78",
+      "name": "Send a text message",
+      "webhookId": "70c95371-7c77-454b-bef8-86d0b471024c",
+      "credentials": {
+        "telegramApi": {
+          "id": "5EkWZ1dI9Jk9giXW",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "id-1",
+              "leftValue": "={{ $json.message.photo }}",
+              "operator": {
+                "type": "array",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "74e1831d-8a9e-4944-bfc2-5dd08dfca937",
+      "name": "Check if Photo",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        112,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $json.message.photo[$json.message.photo.length - 1].file_id }}",
+        "additionalFields": {}
+      },
+      "id": "e0155060-1350-4ff6-ac7e-13017fe08cce",
+      "name": "Download Photo",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        336,
+        352
+      ],
+      "webhookId": "a22fe1f9-2bb3-494f-bf6e-f2e877504ec7",
+      "credentials": {
+        "telegramApi": {
+          "id": "5EkWZ1dI9Jk9giXW",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.ocr.space/parse/image",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "K87200205388957"
+            },
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "language",
+              "value": "eng"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "55939231-0335-443a-a7a4-3c3f2b381406",
+      "name": "OCR with OCR.space",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        560,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ocrResponse = $json; console.log('OCR Response:', JSON.stringify(ocrResponse)); if (ocrResponse?.IsErroredOnProcessing === true) { const errorMsg = ocrResponse?.ErrorMessage?.[0] || 'OCR processing failed'; return [{ json: { text: `OCR Error: ${errorMsg}` } }]; } const parsedResults = ocrResponse?.ParsedResults; if (!parsedResults || parsedResults.length === 0) { return [{ json: { text: 'Unable to extract text from image. The OCR service did not return any results.' } }]; } const text = parsedResults[0]?.ParsedText ?? ''; if (!text || text.trim() === '') { return [{ json: { text: 'No text found in the image. The image may not contain readable text.' } }]; } return [{ json: { text: text.trim() } }];"
+      },
+      "id": "b23a6dd3-7d9e-4159-a41b-9ef3f0c7205f",
+      "name": "Extract OCR Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1ULSA4V4VxEOrLWL_lJICUtb53GtpCLTmhl_dCaiqX04",
+          "mode": "list",
+          "cachedResultName": "telegram_agent_memory",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ULSA4V4VxEOrLWL_lJICUtb53GtpCLTmhl_dCaiqX04/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1ULSA4V4VxEOrLWL_lJICUtb53GtpCLTmhl_dCaiqX04/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{$now}}",
+            "chatId": "={{$node[\"Telegram Trigger\"].json[\"message\"][\"chat\"][\"id\"]}}",
+            "isImage": "={{$json[\"isImage\"]}}",
+            "userText": "={{$node[\"Edit Fields\"].json[\"text\"]}}\n",
+            "botReply": "={{$node[\"Code in JavaScript\"].json[\"finalReply\"]}}\n"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "chatId",
+              "displayName": "chatId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "isImage",
+              "displayName": "isImage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "userText",
+              "displayName": "userText",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "botReply",
+              "displayName": "botReply",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1680,
+        256
+      ],
+      "id": "68adf3a3-82ba-431e-ba61-3690d3061e73",
+      "name": "Append row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "MVEhop74FtjZ4a2Q",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer <api_key>"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"llama-3.3-70b-versatile\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"You are an intent and tone classifier. You must ALWAYS respond with valid JSON only.\"\n    },\n    {\n      role: \"user\",\n      content:\n        \"Classify the following user message:\\n\\n\" +\n        \"\\\"\" + $node[\"Edit Fields\"].json[\"text\"] + \"\\\"\\n\\n\" +\n        \"Return ONLY valid JSON like this (no explanation):\\n\" +\n        \"{\\n\" +\n        \"  \\\"intent\\\": \\\"question | request | status_update | chit_chat | emotional_support\\\",\\n\" +\n        \"  \\\"tone\\\": \\\"neutral | friendly | formal | frustrated | excited\\\"\\n\" +\n        \"}\"\n    }\n  ],\n  max_tokens: 200,\n  temperature: 0.0\n}) }}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1152,
+        256
+      ],
+      "id": "abf0c128-5051-4a86-b1b4-603d875f67cb",
+      "name": "HTTP Request1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// raw LLM reply from the intent classifier\nconst raw = $json.choices?.[0]?.message?.content ?? \"{}\";\n\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (error) {\n  parsed = {};\n}\n\nconst intent = parsed.intent || \"unknown\";\nconst tone = parsed.tone || \"neutral\";\n\nreturn [\n  {\n    json: {\n      intent,\n      tone\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1296,
+        256
+      ],
+      "id": "765f29c1-5dd9-444b-b46b-8ab3df1b38d6",
+      "name": "Code in JavaScript1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check if Photo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Photo": {
+      "main": [
+        [
+          {
+            "node": "Download Photo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Photo": {
+      "main": [
+        [
+          {
+            "node": "OCR with OCR.space",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract OCR Text": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OCR with OCR.space": {
+      "main": [
+        [
+          {
+            "node": "Extract OCR Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append row in sheet": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "ce5c16a9-6be0-4f49-adef-7b8714ad078c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "63d5c4f80c1eaa471f1729058b4a8f87eb6aa2604abfbcc3cde44226795267aa"
+  },
+  "id": "mqPlFGQlnHRQQoDY",
+  "tags": []
+}
